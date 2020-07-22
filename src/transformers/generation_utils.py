@@ -120,6 +120,7 @@ class GenerationMixin:
         attention_mask: Optional[torch.LongTensor] = None,
         decoder_start_token_id: Optional[int] = None,
         use_cache: Optional[bool] = None,
+        limit_vocab_to_input: Optional[bool] = None,
         **model_specific_kwargs
     ) -> torch.LongTensor:
         r""" Generates sequences for models with a LM head. The method currently supports greedy decoding, beam-search decoding, sampling with temperature, sampling with top-k or nucleus sampling.
@@ -457,6 +458,7 @@ class GenerationMixin:
                 attention_mask=attention_mask,
                 use_cache=use_cache,
                 model_specific_kwargs=model_specific_kwargs,
+                limit_vocab_to_input_ids=limit_vocab_to_input,
             )
         else:
             output = self._generate_no_beam_search(
@@ -478,6 +480,7 @@ class GenerationMixin:
                 attention_mask=attention_mask,
                 use_cache=use_cache,
                 model_specific_kwargs=model_specific_kwargs,
+                limit_vocab_to_input_ids=limit_vocab_to_input,
             )
 
         return output
@@ -502,6 +505,7 @@ class GenerationMixin:
         attention_mask,
         use_cache,
         model_specific_kwargs,
+        limit_vocab_to_input_ids: bool = False,
     ):
         """ Generate sequences for each example without beam search (num_beams == 1).
             All returned sequence are generated independantly.
@@ -542,6 +546,11 @@ class GenerationMixin:
                 # Temperature (higher temperature => more likely to sample low probability tokens)
                 if temperature != 1.0:
                     scores = scores / temperature
+
+                # Limit output to only contain tokens in the input
+                if limit_vocab_to_input_ids:
+                    scores = vocabulary_constraint_filtering(scores, input_ids)
+
                 # Top-p/top-k filtering
                 next_token_logscores = top_k_top_p_filtering(scores, top_k=top_k, top_p=top_p)
                 # Sample
@@ -607,6 +616,7 @@ class GenerationMixin:
         attention_mask,
         use_cache,
         model_specific_kwargs,
+        limit_vocab_to_input_ids: bool = False,
     ):
         """ Generate sequences for each example with beam search.
         """
@@ -672,6 +682,19 @@ class GenerationMixin:
                 # Temperature
                 if temperature != 1.0:
                     _scores = _scores / temperature
+
+                if limit_vocab_to_input_ids:
+                    # Repeat each input_ids for beam size times
+                    # https://stackoverflow.com/questions/55757255/replicate-subtensors-in-pytorch
+
+                    _orig_shape = input_ids.size()
+                    beam_input_ids = input_ids.unsqueeze(1)
+                    _shape = list(beam_input_ids.size())
+                    _shape[1] = num_beams
+                    beam_input_ids = beam_input_ids.expand(_shape)
+                    beam_input_ids = beam_input_ids.reshape(-1, *_orig_shape[1:])
+                    _scores = vocabulary_constraint_filtering(_scores, beam_input_ids)
+
                 # Top-p/top-k filtering
                 _scores = top_k_top_p_filtering(
                     _scores, top_k=top_k, top_p=top_p, min_tokens_to_keep=2
@@ -942,6 +965,32 @@ def top_k_top_p_filtering(
         # scatter sorted tensors to original indexing
         indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
         logits[indices_to_remove] = filter_value
+    return logits
+
+
+def vocabulary_constraint_filtering(
+    logits: Tensor,
+    tokens_to_keep: Optional[torch.LongTensor],
+    filter_value: float = -1e9,
+    min_tokens_to_keep: int = 1,
+) -> Tensor:
+    """
+    Only keep the list of tokens specified in "tokens_to_keep" list.
+    if len(tokens_to_keep) < min_tokens_to_keep, don't apply the filter
+
+    :param logits:
+    :param tokens_to_keep: A List of tokens to keep in generation
+    :param filter_value:
+    :param min_tokens_to_keep:
+    :return:
+    """
+    assert logits.size()[0] == tokens_to_keep.size()[0], "tokens_to_keep should have the same first (batch size) dimension as logits"
+
+    for i in range(logits.size()[0]):
+        _mask = torch.ones_like(logits[i])
+        _mask[tokens_to_keep[i]] = 0
+        logits[i] += _mask * filter_value
+
     return logits
 
 
