@@ -400,6 +400,8 @@ class GenerationMixin:
                 effective_batch_size * num_beams, input_ids_len
             )  # shape: (batch_size * num_return_sequences * num_beams, cur_len)
 
+        source_input_ids = input_ids
+
         if self.config.is_encoder_decoder:
             # create empty decoder_input_ids
             input_ids = torch.full(
@@ -458,6 +460,7 @@ class GenerationMixin:
                 attention_mask=attention_mask,
                 use_cache=use_cache,
                 model_specific_kwargs=model_specific_kwargs,
+                source_input_ids=source_input_ids,
                 limit_vocab_to_input_ids=limit_vocab_to_input,
             )
         else:
@@ -480,6 +483,7 @@ class GenerationMixin:
                 attention_mask=attention_mask,
                 use_cache=use_cache,
                 model_specific_kwargs=model_specific_kwargs,
+                source_input_ids=source_input_ids,
                 limit_vocab_to_input_ids=limit_vocab_to_input,
             )
 
@@ -505,6 +509,7 @@ class GenerationMixin:
         attention_mask,
         use_cache,
         model_specific_kwargs,
+        source_input_ids,
         limit_vocab_to_input_ids: bool = False,
     ):
         """ Generate sequences for each example without beam search (num_beams == 1).
@@ -549,7 +554,7 @@ class GenerationMixin:
 
                 # Limit output to only contain tokens in the input
                 if limit_vocab_to_input_ids:
-                    scores = vocabulary_constraint_filtering(scores, input_ids)
+                    scores = vocabulary_constraint_filtering(scores, source_input_ids)
 
                 # Top-p/top-k filtering
                 next_token_logscores = top_k_top_p_filtering(scores, top_k=top_k, top_p=top_p)
@@ -616,6 +621,7 @@ class GenerationMixin:
         attention_mask,
         use_cache,
         model_specific_kwargs,
+        source_input_ids,
         limit_vocab_to_input_ids: bool = False,
     ):
         """ Generate sequences for each example with beam search.
@@ -684,16 +690,7 @@ class GenerationMixin:
                     _scores = _scores / temperature
 
                 if limit_vocab_to_input_ids:
-                    # Repeat each input_ids for beam size times
-                    # https://stackoverflow.com/questions/55757255/replicate-subtensors-in-pytorch
-
-                    _orig_shape = input_ids.size()
-                    beam_input_ids = input_ids.unsqueeze(1)
-                    _shape = list(beam_input_ids.size())
-                    _shape[1] = num_beams
-                    beam_input_ids = beam_input_ids.expand(_shape)
-                    beam_input_ids = beam_input_ids.reshape(-1, *_orig_shape[1:])
-                    _scores = vocabulary_constraint_filtering(_scores, beam_input_ids)
+                    _scores = vocabulary_constraint_filtering(_scores, source_input_ids)
 
                 # Top-p/top-k filtering
                 _scores = top_k_top_p_filtering(
